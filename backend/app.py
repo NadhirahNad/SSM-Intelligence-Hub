@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from retriever import retrieve_context
 import os
@@ -7,12 +7,12 @@ import json
 
 app = FastAPI()
 
-# Allow frontend connections
+# Frontend connections
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace "*" with your frontend URL if needed
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"], 
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -30,30 +30,42 @@ async def ask_question(request: Request):
     query = data.get("question")
     act_name = data.get("act_name")
 
-    # Retrieve context from CSV + FAISS
+    if not query or not act_name:
+        raise HTTPException(status_code=400, detail="Missing 'question' or 'act_name' in request.")
+
+    # 1. Retrieve context
     try:
-        context = retrieve_context(query, act_name)
+        # Assuming retrieve_context returns a string
+        context = retrieve_context(query, act_name) 
     except Exception as e:
-        return {"answer": f"Error retrieving context: {str(e)}"}
+        # Raise 500 error if retrieval fails (e.g., file not found, bad embeddings)
+        raise HTTPException(status_code=500, detail=f"Error during context retrieval: {str(e)}")
 
-    # Construct prompt for generation
-    prompt = f"Answer based on law: {context} \nQuestion: {query}"
+    # 2. Construct prompt
+    prompt = f"Answer based on the following legal text: {context} \nQuestion: {query}"
 
-    # Call Hugging Face Inference API
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 150}}
+    # 3. Call Hugging Face Inference API
+    # ... (headers, payload setup as before) ...
 
     response = requests.post(
-        f"https://api-inference.huggingface.co/models/{HF_MODEL}",
-        headers=headers,
+        f"https://api-inference.huggingface.co/models/{HF_MODEL}", 
         data=json.dumps(payload)
     )
 
     if response.status_code != 200:
-        return {"answer": f"Error from Hugging Face API: {response.text}"}
+        # Raise 502 Bad Gateway if the external service (HF) fails
+        raise HTTPException(
+            status_code=502, 
+            detail=f"Hugging Face API failed: {response.status_code}. Response: {response.text}"
+        )
 
-    answer = response.json()[0]["generated_text"]
-    return {"answer": answer}
+    # 4. Return successful answer
+    try:
+        answer = response.json()[0]["generated_text"]
+        return {"answer": answer}
+    except (IndexError, KeyError) as e:
+        # Handle unexpected JSON response structure from the API
+        raise HTTPException(status_code=502, detail=f"Failed to parse answer from Hugging Face response: {str(e)}")
 
 # Cross-platform startup
 if __name__ == "__main__":
